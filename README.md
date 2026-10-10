@@ -1,4 +1,4 @@
-# ScriptStudio — Dark Cherry Edition
+# ScriptStudio 
 
 **Version 1.0.0 · Windows 10/11, 64-bit**
 
