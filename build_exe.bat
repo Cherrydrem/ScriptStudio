@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-py -3 -m venv .build-env
+py -3.12 -m venv .build-env
 if errorlevel 1 goto fail
 call .build-env\Scripts\activate.bat
 python -m pip install -r requirements.txt pyinstaller
