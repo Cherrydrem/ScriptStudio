@@ -1,13 +1,16 @@
-"""ScriptStudio: write witout worries"""
-import os,sys,json,copy,uuid,base64,tempfile,time,html
+"""ScriptStudio: picture-based script writing in a dark cherry workspace."""
+import os,sys,json,copy,uuid,base64,tempfile,time,html,re,urllib.request
 from pathlib import Path
-from PySide6.QtCore import QEvent,Qt,QSize,QTimer,QSettings,QStandardPaths,QBuffer,QByteArray,QIODevice,Signal,QObject,QRunnable,QThreadPool
-from PySide6.QtGui import QIcon,QImage,QPixmap,QFont,QFontDatabase,QAction,QKeySequence,QUndoStack,QUndoCommand,QTextDocument,QPageSize
-from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QComboBox,QListWidget,QListWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView,QToolBar
+from PySide6.QtCore import QEvent,Qt,QSize,QTimer,QSettings,QStandardPaths,QBuffer,QByteArray,QIODevice,Signal,QObject,QRunnable,QThreadPool,QUrl
+from PySide6.QtGui import QIcon,QImage,QPixmap,QFont,QFontDatabase,QAction,QKeySequence,QUndoStack,QUndoCommand,QTextDocument,QPageSize,QDesktopServices
+from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QComboBox,QListWidget,QListView,QListWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView,QToolBar
 from PySide6.QtPrintSupport import QPrinter
-VERSION='1.0.0'
+VERSION='1.1.0'
 FILTER='ScriptStudio projects (*.scriptstudio)'
+# Put your own GitHub name and repository name here to turn on update checking.
+UPDATE_API='https://api.github.com/repos/YOUR-NAME/YOUR-REPO/releases/latest'
 EMOTIONS=['whispering','shouting','excited','angry','sad','nervous','laughing','crying','sarcastic','calm','off-screen']
+TAG_PRESETS=EMOTIONS+['flashback','important','needs rewrite','music','sound effect','cut?']
 FONTS_LOADED=False
 def load_fonts():
     global FONTS_LOADED
@@ -17,7 +20,7 @@ def load_fonts():
     FONTS_LOADED=True
 def uid():return uuid.uuid4().hex
 def new_block(kind='scene',speaker=None,text=''):
-    return {'id':uid(),'type':kind,'text':text,'speaker':speaker if kind=='dialogue' else None,'delivery':''}
+    return {'id':uid(),'type':kind,'text':text,'speaker':speaker if kind=='dialogue' else None,'delivery':'','tags':[]}
 def new_project():return {'format':'ScriptStudio','version':1,'title':'Untitled','characters':[],'blocks':[new_block('scene',text='Scene 1 — ')]}
 def image_data(path):
     image=QImage(str(path))
@@ -61,6 +64,8 @@ def validate(data):
         bids.add(b['id'])
         if not isinstance(b.get('text'),str) or not isinstance(b.get('delivery',''),str):raise ValueError('Invalid script text.')
         if b.get('speaker') is not None and b.get('speaker') not in ids:raise ValueError('Unknown speaker reference.')
+        # Tags are optional, so older projects without them still open.
+        if not isinstance(b.get('tags',[]),list) or not all(isinstance(t,str) for t in b.get('tags',[])):raise ValueError('Invalid tags.')
     return data
 class JobSignals(QObject):done=Signal(object,str)
 class WriteJob(QRunnable):
@@ -70,6 +75,20 @@ class WriteJob(QRunnable):
         try:atomic_json(self.path,self.data)
         except Exception as e:error=str(e)
         self.signals.done.emit(self.context,error)
+def version_tuple(text):
+    # 'v1.10.2' becomes (1, 10, 2), so versions compare as numbers, not as text.
+    numbers=[int(n) for n in re.findall(r'\d+',str(text))[:3]]
+    return tuple(numbers+[0]*(3-len(numbers)))
+class UpdateJob(QRunnable):
+    # Asks GitHub for the latest release in the background, so the app never freezes.
+    def __init__(self,url,context):super().__init__();self.url=url;self.context=context;self.signals=JobSignals()
+    def run(self):
+        error='';info={}
+        try:
+            request=urllib.request.Request(self.url,headers={'User-Agent':'ScriptStudio','Accept':'application/vnd.github+json'})
+            with urllib.request.urlopen(request,timeout=6) as response:info=json.loads(response.read(200000).decode('utf-8'))
+        except Exception as e:error=str(e) or 'Could not reach GitHub.'
+        self.signals.done.emit({'context':self.context,'info':info},error)
 class Edit(QUndoCommand):
     def __init__(self,win,before,after,before_id,after_id,label,key):
         super().__init__(label);self.win=win;self.before=before;self.after=after;self.before_id=before_id;self.after_id=after_id;self.key=key;self.when=time.monotonic();self.first=True
@@ -140,10 +159,11 @@ class Window(QMainWindow):
         self.recovery_file=Path(directory)/('session-'+uid()+'.json');self.pool=QThreadPool(self);self.pool.setMaxThreadCount(1)
         self.history=QUndoStack(self);self.history.setUndoLimit(100)
         self.build_ui();self.build_menus();self.history.indexChanged.connect(self.history_state);self.history.cleanChanged.connect(self.history_state)
-        for editor in (self.text,self.title_edit,self.delivery.lineEdit()):editor.installEventFilter(self)
+        for editor in (self.text,self.title_edit,self.delivery.lineEdit(),self.tag_combo.lineEdit()):editor.installEventFilter(self)
         self.refresh();self.history.setClean();self.restore_workspace()
         self.timer=QTimer(self);self.timer.setInterval(30000);self.timer.timeout.connect(self.autosave);self.timer.start()
         if recovery_prompt:QTimer.singleShot(100,self.offer_recovery)
+        if recovery_prompt and self.settings.value('check_updates',True,type=bool):QTimer.singleShot(1500,self.check_updates)
     def button(self,text,fn,layout):
         b=QPushButton(text);b.clicked.connect(fn);layout.addWidget(b);return b
     def heading(self,text,layout):
@@ -162,7 +182,7 @@ class Window(QMainWindow):
         middle=QWidget();ml=QVBoxLayout(middle);ml.setContentsMargins(5,0,5,0);self.heading('SCRIPT',ml)
         self.title_edit=QLineEdit();self.title_edit.setPlaceholderText('Script title');self.title_edit.textChanged.connect(self.title_changed);ml.addWidget(self.title_edit)
         self.block_search=QLineEdit();self.block_search.setPlaceholderText('Find text, scenes, or a speaker…');self.block_search.textChanged.connect(self.filter_blocks);ml.addWidget(self.block_search)
-        self.blocks=QListWidget();self.blocks.setWordWrap(True);self.blocks.setSpacing(3);self.blocks.currentItemChanged.connect(self.block_selected);self.blocks.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove);self.blocks.setDefaultDropAction(Qt.DropAction.MoveAction);self.blocks.model().rowsMoved.connect(self.rows_moved);ml.addWidget(self.blocks,1)
+        self.blocks=QListWidget();self.blocks.setWordWrap(True);self.blocks.setSpacing(3);self.blocks.currentItemChanged.connect(self.block_selected);self.blocks.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove);self.blocks.setDefaultDropAction(Qt.DropAction.MoveAction);self.blocks.model().rowsMoved.connect(self.rows_moved);self.blocks.itemDoubleClicked.connect(self.rename_scene);ml.addWidget(self.blocks,1)
         row=QHBoxLayout();self.button('+ Dialogue',lambda:self.add_block('dialogue'),row);self.button('+ Action',lambda:self.add_block('action'),row);self.button('+ Scene',lambda:self.add_block('scene'),row);ml.addLayout(row)
         row=QHBoxLayout();self.up_button=self.button('↑',lambda:self.move_block(-1),row);self.down_button=self.button('↓',lambda:self.move_block(1),row);self.duplicate_button=self.button('Duplicate',self.duplicate_block,row);self.delete_button=self.button('Delete',self.delete_block,row);ml.addLayout(row)
         self.splitter.addWidget(middle)
@@ -170,6 +190,13 @@ class Window(QMainWindow):
         self.type_combo=QComboBox();self.type_combo.addItem('Scene heading','scene');self.type_combo.addItem('Action','action');self.type_combo.addItem('Dialogue','dialogue');self.type_combo.currentIndexChanged.connect(self.type_changed);el.addWidget(self.type_combo)
         self.speaker_label=QLabel('Speaker');el.addWidget(self.speaker_label);self.speaker_combo=QComboBox();self.speaker_combo.setIconSize(QSize(34,34));self.speaker_combo.currentIndexChanged.connect(self.speaker_changed);el.addWidget(self.speaker_combo)
         self.delivery_label=QLabel('Delivery note (optional)');el.addWidget(self.delivery_label);self.delivery=QComboBox();self.delivery.setEditable(True);self.delivery.setInsertPolicy(QComboBox.InsertPolicy.NoInsert);self.delivery.addItems(EMOTIONS);self.delivery.setCurrentIndex(-1);self.delivery.lineEdit().setPlaceholderText('pick an emotion or type your own…');self.delivery.currentTextChanged.connect(self.delivery_changed);el.addWidget(self.delivery)
+        # Tags: pick a preset or type your own. Click a tag below to remove it.
+        self.tag_label=QLabel('Tags');el.addWidget(self.tag_label);row=QHBoxLayout()
+        self.tag_combo=QComboBox();self.tag_combo.setEditable(True);self.tag_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert);self.tag_combo.lineEdit().setPlaceholderText('pick a tag or type your own…')
+        self.tag_combo.textActivated.connect(self.add_tag);self.tag_combo.lineEdit().returnPressed.connect(lambda:self.add_tag(self.tag_combo.currentText()));row.addWidget(self.tag_combo,1)
+        self.tag_add=self.button('+ Tag',lambda:self.add_tag(self.tag_combo.currentText()),row);el.addLayout(row)
+        self.tag_list=QListWidget();self.tag_list.setFlow(QListView.Flow.LeftToRight);self.tag_list.setWrapping(True);self.tag_list.setResizeMode(QListView.ResizeMode.Adjust);self.tag_list.setSpacing(4);self.tag_list.setMaximumHeight(104)
+        self.tag_list.setToolTip('Click a tag to remove it.');self.tag_list.itemClicked.connect(self.remove_tag);el.addWidget(self.tag_list)
         self.text=QPlainTextEdit();self.text.setPlaceholderText('Write here…');self.text.setUndoRedoEnabled(False);self.text.setFont(QFont('DejaVu Sans',13));self.text.textChanged.connect(self.text_changed);el.addWidget(self.text,1)
         self.editor_hint=QLabel('Scene headings separate the story. Action describes what happens. Dialogue uses your cast.');self.editor_hint.setWordWrap(True);self.editor_hint.setObjectName('muted');el.addWidget(self.editor_hint)
         self.splitter.addWidget(editor);self.splitter.setSizes([235,450,450]);self.splitter.setChildrenCollapsible(False)
@@ -182,9 +209,12 @@ class Window(QMainWindow):
         f=self.menuBar().addMenu('File');self.new_action=self.action(f,'New','Ctrl+N',self.new);self.open_action=self.action(f,'Open…','Ctrl+O',self.open_dialog);self.save_action=self.action(f,'Save','Ctrl+S',self.save);self.saveas_action=self.action(f,'Save As…','Ctrl+Shift+S',self.save_as);self.recent=f.addMenu('Recent Projects');self.update_recent();f.addSeparator();self.action(f,'Recover autosaved work…',None,self.recover_dialog);self.action(f,'Exit','Alt+F4',self.close)
         e=self.menuBar().addMenu('Edit');self.undo_action=self.action(e,'Undo','Ctrl+Z',self.undo);self.redo_action=self.action(e,'Redo','Ctrl+Y',self.redo);self.redo_extra=QAction(self);self.redo_extra.setShortcut('Ctrl+Shift+Z');self.redo_extra.triggered.connect(self.redo);self.addAction(self.redo_extra)
         self.action(e,'Duplicate block','Ctrl+D',self.duplicate_block)
+        self.action(e,'Rename scene…','F2',self.rename_scene)
         export=self.menuBar().addMenu('Export');self.action(export,'Plain text (.txt)…',None,lambda:self.export_dialog('txt'));self.action(export,'Readable PDF…','Ctrl+E',lambda:self.export_dialog('pdf'));self.action(export,'StoryboardStudio project (.sboard)…',None,lambda:self.export_dialog('sboard'))
         view=self.menuBar().addMenu('View');self.action(view,'Reset workspace',None,self.reset_workspace)
         h=self.menuBar().addMenu('Help');self.action(h,'Quick start / shortcuts','F1',self.help);self.action(h,'About',None,lambda:QMessageBox.information(self,'About ScriptStudio',f'ScriptStudio {VERSION}\nPicture-based script writing.\nDark cherry edition.\nLocal files; no account or internet required.'))
+        h.addSeparator();self.action(h,'Check for updates now…',None,lambda:self.check_updates(True))
+        self.update_action=self.action(h,'Check for updates when ScriptStudio starts',None,lambda on:self.settings.setValue('check_updates',on));self.update_action.setCheckable(True);self.update_action.setChecked(self.settings.value('check_updates',True,type=bool))
         tb=QToolBar('Main');tb.setObjectName('MainToolbar');tb.setMovable(False);self.addToolBar(tb)
         for a in (self.new_action,self.open_action,self.save_action,self.undo_action,self.redo_action):tb.addAction(a)
     def current_block(self):return next((b for b in self.project['blocks'] if b['id']==self.selected),None)
@@ -210,7 +240,7 @@ class Window(QMainWindow):
         self.undo_action.setText('Undo '+self.history.undoText() if self.history.canUndo() else 'Undo');self.redo_action.setText('Redo '+self.history.redoText() if self.history.canRedo() else 'Redo');self.undo_action.setIconText('Undo');self.redo_action.setIconText('Redo');self.update_title()
     def update_title(self):self.setWindowTitle(('✦ ' if self.dirty() else '')+self.project['title']+' — ScriptStudio')
     def eventFilter(self,obj,event):
-        if obj in (self.text,self.title_edit,self.delivery.lineEdit()) and event.type() in (QEvent.Type.ShortcutOverride,QEvent.Type.KeyPress):
+        if obj in (self.text,self.title_edit,self.delivery.lineEdit(),self.tag_combo.lineEdit()) and event.type() in (QEvent.Type.ShortcutOverride,QEvent.Type.KeyPress):
             undo=event.matches(QKeySequence.StandardKey.Undo);redo=event.matches(QKeySequence.StandardKey.Redo)
             if undo or redo:
                 event.accept()
@@ -224,6 +254,7 @@ class Window(QMainWindow):
     def block_preview(self,b):
         header={'scene':'SCENE','action':'ACTION','dialogue':self.speaker_name(b.get('speaker')).upper()}[b['type']]
         if b['type']=='dialogue' and b.get('delivery'):header+='  ('+b['delivery']+')'
+        if b.get('tags'):header+='   ['+', '.join(b['tags'])+']'
         text=b['text'].replace('\n',' ')
         return header+'\n'+(text[:145]+'…' if len(text)>145 else text or 'Click to write…')
     def refresh(self):
@@ -249,12 +280,12 @@ class Window(QMainWindow):
         old=self.restoring;self.restoring=True
         try:
             b=self.current_block();enabled=b is not None
-            for widget in (self.type_combo,self.text,self.delivery,self.speaker_combo,self.duplicate_button,self.delete_button):widget.setEnabled(enabled)
+            for widget in (self.type_combo,self.text,self.delivery,self.speaker_combo,self.duplicate_button,self.delete_button,self.tag_combo,self.tag_add,self.tag_list):widget.setEnabled(enabled)
             self.up_button.setEnabled(enabled and self.block_index()>0);self.down_button.setEnabled(enabled and self.block_index()<len(self.project['blocks'])-1)
             kind=b['type'] if b else 'scene';dialogue=kind=='dialogue' and enabled
             self.type_combo.setCurrentIndex(self.type_combo.findData(kind));self.editor_heading.setText(kind.upper() if enabled else 'ADD A BLOCK');self.text.setPlainText(b['text'] if b else '')
             for widget in (self.speaker_label,self.speaker_combo,self.delivery_label,self.delivery):widget.setVisible(dialogue)
-            self.speaker_combo.setCurrentIndex(max(0,self.speaker_combo.findData(b.get('speaker') if b else None)));self.delivery.setCurrentText(b.get('delivery','') if b else '')
+            self.speaker_combo.setCurrentIndex(max(0,self.speaker_combo.findData(b.get('speaker') if b else None)));self.delivery.setCurrentText(b.get('delivery','') if b else '');self.load_tags(b)
             self.text.setPlaceholderText({'scene':'Scene 1 — Bedroom, night','action':'Describe what happens…','dialogue':'What do they say?'}[kind])
         finally:self.restoring=old
     def update_block_preview(self):
@@ -293,6 +324,43 @@ class Window(QMainWindow):
         if self.restoring:return
         ids=[self.blocks.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.blocks.count())];mapping={b['id']:b for b in self.project['blocks']}
         if set(ids)==set(mapping):self.mutate('Reorder blocks',lambda:self.project.update(blocks=[mapping[i] for i in ids]))
+    def load_tags(self,b):
+        # The dropdown offers the presets plus every custom tag already used in this script.
+        used=sorted({t for x in self.project['blocks'] for t in x.get('tags',[])},key=str.casefold)
+        self.tag_combo.clear();self.tag_combo.addItems(TAG_PRESETS+[t for t in used if t not in TAG_PRESETS]);self.tag_combo.setCurrentIndex(-1)
+        self.tag_list.clear()
+        for tag in (b.get('tags',[]) if b else []):
+            item=QListWidgetItem(tag+'  ✕');item.setData(Qt.ItemDataRole.UserRole,tag);self.tag_list.addItem(item)
+    def add_tag(self,text):
+        b=self.current_block();tag=' '.join(str(text).split())[:40]
+        if not b or self.restoring or not tag:return
+        if tag.casefold() in [t.casefold() for t in b.get('tags',[])]:self.tag_combo.clearEditText();return
+        self.mutate('Add tag',lambda:b.setdefault('tags',[]).append(tag))
+    def remove_tag(self,item):
+        b=self.current_block();tag=item.data(Qt.ItemDataRole.UserRole)
+        if b and tag in b.get('tags',[]):self.mutate('Remove tag',lambda:b['tags'].remove(tag))
+    def rename_scene(self,*_):
+        b=self.current_block()
+        if not b or b['type']!='scene':self.statusBar().showMessage('Select a scene heading, then press F2 to rename it.');return
+        current=' '.join(b['text'].splitlines())
+        name,ok=QInputDialog.getText(self,'Rename scene','Scene name:',text=current)
+        name=name.strip()
+        if ok and name and name!=current:self.mutate('Rename scene',lambda:b.update(text=name))
+    def check_updates(self,manual=False):
+        if 'YOUR-NAME' in UPDATE_API:
+            if manual:QMessageBox.information(self,'Check for updates','Update checking is not set up yet.\nPut your GitHub name and repository in UPDATE_API near the top of scriptstudio.py.')
+            return False
+        context={'manual':manual};job=UpdateJob(UPDATE_API,context);job.signals.done.connect(self.update_check_done);self.jobs.append(job);QThreadPool.globalInstance().start(job);return True
+    def update_check_done(self,result,error):
+        context=result['context'];self.jobs=[j for j in self.jobs if j.context is not context];manual=context['manual'];info=result['info']
+        if error:
+            if manual:QMessageBox.information(self,'Check for updates','Could not check for updates right now.\n'+error)
+            return
+        tag=str(info.get('tag_name',''));link=str(info.get('html_url',''))
+        if version_tuple(tag)>version_tuple(VERSION) and link.startswith('https://github.com/'):
+            answer=QMessageBox.question(self,'Update available',f'ScriptStudio {tag.lstrip("vV")} is available. You have {VERSION}.\n\nOpen the download page? Nothing is installed automatically.')
+            if answer==QMessageBox.StandardButton.Yes:QDesktopServices.openUrl(QUrl(link))
+        elif manual:QMessageBox.information(self,'Check for updates','You have the latest version.')
     def text_changed(self):
         b=self.current_block()
         if b and not self.restoring:
@@ -352,7 +420,7 @@ class Window(QMainWindow):
         search=self.block_search.text().casefold()
         for i in range(self.blocks.count()):
             item=self.blocks.item(i);b=next((b for b in self.project['blocks'] if b['id']==item.data(Qt.ItemDataRole.UserRole)),None)
-            if b:item.setHidden(search not in (self.speaker_name(b.get('speaker'))+' '+b['text']+' '+b.get('delivery','')+' '+b['type']).casefold())
+            if b:item.setHidden(search not in (self.speaker_name(b.get('speaker'))+' '+b['text']+' '+b.get('delivery','')+' '+' '.join(b.get('tags',[]))+' '+b['type']).casefold())
         self.blocks.setDragEnabled(not search);self.blocks.setAcceptDrops(not search)
     def ask_save(self):
         self.wait_jobs()
@@ -506,7 +574,7 @@ class Window(QMainWindow):
         if geometry:self.restoreGeometry(geometry)
         if splitter:self.splitter.restoreState(splitter)
     def reset_workspace(self):self.resize(1220,810);self.splitter.setSizes([235,450,450])
-    def help(self):QMessageBox.information(self,'ScriptStudio — quick start','1. Add a character: picture, name, optional description.\n2. Add a scene, action or dialogue block.\n3. Click a cast picture to choose who is talking.\n4. Write in the right-hand editor. Reorder blocks with arrows or drag.\n\nCtrl+S: Save | Ctrl+Shift+S: Save As\nCtrl+O: Open | Ctrl+N: New\nCtrl+Z: Undo | Ctrl+Y / Ctrl+Shift+Z: Redo\nCtrl+D: Duplicate block | Ctrl+E: PDF export\n\nCharacters are linked by ID; renaming updates their dialogue. Pictures are embedded in .scriptstudio projects. Recovery runs every 30 seconds.\n\nExport > StoryboardStudio creates blank panels with script text as notes. This is a one-way export, not live syncing.')
+    def help(self):QMessageBox.information(self,'ScriptStudio — quick start','1. Add a character: picture, name, optional description.\n2. Add a scene, action or dialogue block.\n3. Click a cast picture to choose who is talking.\n4. Write in the right-hand editor. Reorder blocks with arrows or drag.\n\nCtrl+S: Save | Ctrl+Shift+S: Save As\nCtrl+O: Open | Ctrl+N: New\nCtrl+Z: Undo | Ctrl+Y / Ctrl+Shift+Z: Redo\nCtrl+D: Duplicate block | F2: Rename scene | Ctrl+E: PDF export\n\nTags: pick a preset or type your own, then click a tag to remove it.\n\nCharacters are linked by ID; renaming updates their dialogue. Pictures are embedded in .scriptstudio projects. Recovery runs every 30 seconds.\n\nExport > StoryboardStudio creates blank panels with script text as notes. This is a one-way export, not live syncing.')
     def dragEnterEvent(self,event):
         if event.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith('.scriptstudio') for u in event.mimeData().urls()):event.acceptProposedAction()
     def dropEvent(self,event):
