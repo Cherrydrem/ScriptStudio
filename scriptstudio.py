@@ -1,4 +1,4 @@
-"""ScriptStudio: picture-based script writing in a dark cherry workspace."""
+"""ScriptStudio: write witout worries"""
 import os,sys,json,copy,uuid,base64,tempfile,time,html
 from pathlib import Path
 from PySide6.QtCore import QEvent,Qt,QSize,QTimer,QSettings,QStandardPaths,QBuffer,QByteArray,QIODevice,Signal,QObject,QRunnable,QThreadPool
@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBox
 from PySide6.QtPrintSupport import QPrinter
 VERSION='1.0.0'
 FILTER='ScriptStudio projects (*.scriptstudio)'
+EMOTIONS=['whispering','shouting','excited','angry','sad','nervous','laughing','crying','sarcastic','calm','off-screen']
 FONTS_LOADED=False
 def load_fonts():
     global FONTS_LOADED
@@ -139,7 +140,7 @@ class Window(QMainWindow):
         self.recovery_file=Path(directory)/('session-'+uid()+'.json');self.pool=QThreadPool(self);self.pool.setMaxThreadCount(1)
         self.history=QUndoStack(self);self.history.setUndoLimit(100)
         self.build_ui();self.build_menus();self.history.indexChanged.connect(self.history_state);self.history.cleanChanged.connect(self.history_state)
-        for editor in (self.text,self.title_edit,self.delivery):editor.installEventFilter(self)
+        for editor in (self.text,self.title_edit,self.delivery.lineEdit()):editor.installEventFilter(self)
         self.refresh();self.history.setClean();self.restore_workspace()
         self.timer=QTimer(self);self.timer.setInterval(30000);self.timer.timeout.connect(self.autosave);self.timer.start()
         if recovery_prompt:QTimer.singleShot(100,self.offer_recovery)
@@ -168,7 +169,7 @@ class Window(QMainWindow):
         editor=QWidget();el=QVBoxLayout(editor);el.setContentsMargins(7,0,0,0);self.editor_heading=self.heading('SCENE',el)
         self.type_combo=QComboBox();self.type_combo.addItem('Scene heading','scene');self.type_combo.addItem('Action','action');self.type_combo.addItem('Dialogue','dialogue');self.type_combo.currentIndexChanged.connect(self.type_changed);el.addWidget(self.type_combo)
         self.speaker_label=QLabel('Speaker');el.addWidget(self.speaker_label);self.speaker_combo=QComboBox();self.speaker_combo.setIconSize(QSize(34,34));self.speaker_combo.currentIndexChanged.connect(self.speaker_changed);el.addWidget(self.speaker_combo)
-        self.delivery_label=QLabel('Delivery note (optional)');el.addWidget(self.delivery_label);self.delivery=QLineEdit();self.delivery.setPlaceholderText('whispering, excited, off-screen…');self.delivery.textChanged.connect(self.delivery_changed);el.addWidget(self.delivery)
+        self.delivery_label=QLabel('Delivery note (optional)');el.addWidget(self.delivery_label);self.delivery=QComboBox();self.delivery.setEditable(True);self.delivery.setInsertPolicy(QComboBox.InsertPolicy.NoInsert);self.delivery.addItems(EMOTIONS);self.delivery.setCurrentIndex(-1);self.delivery.lineEdit().setPlaceholderText('pick an emotion or type your own…');self.delivery.currentTextChanged.connect(self.delivery_changed);el.addWidget(self.delivery)
         self.text=QPlainTextEdit();self.text.setPlaceholderText('Write here…');self.text.setUndoRedoEnabled(False);self.text.setFont(QFont('DejaVu Sans',13));self.text.textChanged.connect(self.text_changed);el.addWidget(self.text,1)
         self.editor_hint=QLabel('Scene headings separate the story. Action describes what happens. Dialogue uses your cast.');self.editor_hint.setWordWrap(True);self.editor_hint.setObjectName('muted');el.addWidget(self.editor_hint)
         self.splitter.addWidget(editor);self.splitter.setSizes([235,450,450]);self.splitter.setChildrenCollapsible(False)
@@ -209,7 +210,7 @@ class Window(QMainWindow):
         self.undo_action.setText('Undo '+self.history.undoText() if self.history.canUndo() else 'Undo');self.redo_action.setText('Redo '+self.history.redoText() if self.history.canRedo() else 'Redo');self.undo_action.setIconText('Undo');self.redo_action.setIconText('Redo');self.update_title()
     def update_title(self):self.setWindowTitle(('✦ ' if self.dirty() else '')+self.project['title']+' — ScriptStudio')
     def eventFilter(self,obj,event):
-        if obj in (self.text,self.title_edit,self.delivery) and event.type() in (QEvent.Type.ShortcutOverride,QEvent.Type.KeyPress):
+        if obj in (self.text,self.title_edit,self.delivery.lineEdit()) and event.type() in (QEvent.Type.ShortcutOverride,QEvent.Type.KeyPress):
             undo=event.matches(QKeySequence.StandardKey.Undo);redo=event.matches(QKeySequence.StandardKey.Redo)
             if undo or redo:
                 event.accept()
@@ -253,7 +254,7 @@ class Window(QMainWindow):
             kind=b['type'] if b else 'scene';dialogue=kind=='dialogue' and enabled
             self.type_combo.setCurrentIndex(self.type_combo.findData(kind));self.editor_heading.setText(kind.upper() if enabled else 'ADD A BLOCK');self.text.setPlainText(b['text'] if b else '')
             for widget in (self.speaker_label,self.speaker_combo,self.delivery_label,self.delivery):widget.setVisible(dialogue)
-            self.speaker_combo.setCurrentIndex(max(0,self.speaker_combo.findData(b.get('speaker') if b else None)));self.delivery.setText(b.get('delivery','') if b else '')
+            self.speaker_combo.setCurrentIndex(max(0,self.speaker_combo.findData(b.get('speaker') if b else None)));self.delivery.setCurrentText(b.get('delivery','') if b else '')
             self.text.setPlaceholderText({'scene':'Scene 1 — Bedroom, night','action':'Describe what happens…','dialogue':'What do they say?'}[kind])
         finally:self.restoring=old
     def update_block_preview(self):
