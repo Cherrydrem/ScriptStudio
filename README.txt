@@ -25,7 +25,7 @@
 4. Leave **Desktop shortcut** selected if you want one, then click **Install**.
 5. Open ScriptStudio from the Desktop or Start Menu shortcut, or use **Open ScriptStudio** on the installer’s final page.
 
-The Windows app includes its runtime. **You do not need to create an account.** No internet connection is required to write after downloading the app.
+The Windows app includes its runtime.
 
 Prefer a portable copy? (coming soon)
 
