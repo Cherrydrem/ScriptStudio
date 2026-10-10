@@ -1,0 +1,27 @@
+ScriptStudio third-party notices
+
+ScriptStudio contains unmodified Python 3.12, PySide6 / Shiboken 6.8.3,
+Qt 6.8.3 and the PyInstaller bootloader. It also includes DejaVu fonts.
+
+Python: Python Software Foundation license. See licenses/Python-license.txt.
+PySide6 and Shiboken: LGPL v3, with alternative upstream license options.
+Qt modules used here are provided under their applicable open-source terms.
+See licenses/LGPL-3.txt and licenses/GPL-3.txt. You are permitted to modify
+and replace these libraries under their license terms. ScriptStudio imposes
+no prohibition on reverse engineering for debugging such modifications.
+
+Upstream binding sources and release history:
+https://code.qt.io/cgit/pyside/pyside-setup.git/
+https://doc.qt.io/qtforpython/
+Qt sources:
+https://code.qt.io/cgit/qt/qtbase.git/
+https://code.qt.io/cgit/qt/qtsvg.git/
+The build uses release 6.8.3. The provided ScriptStudio source and build
+launcher allow rebuilding against compatible replacement libraries.
+
+PyInstaller bootloader: GPL with a bootloader exception permitting packaged
+applications. See licenses/PyInstaller-license.txt.
+DejaVu fonts: Bitstream Vera / DejaVu terms. See licenses/DejaVu-fonts.txt.
+
+Character pictures you add remain yours; ensure you have permission to use
+pictures before distributing your script projects.
