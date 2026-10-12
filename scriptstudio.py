@@ -3,14 +3,23 @@ import os,sys,json,copy,uuid,base64,tempfile,time,html,re,urllib.request
 from pathlib import Path
 from PySide6.QtCore import QEvent,Qt,QSize,QTimer,QSettings,QStandardPaths,QBuffer,QByteArray,QIODevice,Signal,QObject,QRunnable,QThreadPool,QUrl
 from PySide6.QtGui import QIcon,QImage,QPixmap,QFont,QFontDatabase,QAction,QKeySequence,QUndoStack,QUndoCommand,QTextDocument,QPageSize,QDesktopServices
-from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QComboBox,QListWidget,QListView,QListWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView,QToolBar
+from PySide6.QtWidgets import QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QLineEdit,QPlainTextEdit,QComboBox,QCheckBox,QListWidget,QListView,QListWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QFormLayout,QAbstractItemView,QToolBar
 from PySide6.QtPrintSupport import QPrinter
-VERSION='1.1.0'
+VERSION='1.2.0'
 FILTER='ScriptStudio projects (*.scriptstudio)'
 # Put your own GitHub name and repository name here to turn on update checking.
-UPDATE_API='https://github.com/Cherrydrem/ScriptStudio/releases/tag/alpha'
-EMOTIONS=['whispering','shouting','excited','angry','sad','nervous','laughing','crying','sarcastic','calm','off-screen']
-TAG_PRESETS=EMOTIONS+['flashback','important','needs rewrite','music','sound effect','cut?']
+UPDATE_API='https://api.github.com/repos/YOUR-NAME/YOUR-REPO/releases/latest'
+EMOTIONS=['whispering','shouting','excited','angry','sad','nervous','laughing','crying','sarcastic','calm','off-screen','happy','scared','confused','tired','cheerful','serious','pleading','annoyed','surprised','dreamy','mumbling','singing','under breath','deadpan']
+TAG_PRESETS=EMOTIONS[:11]+['flashback','important','needs rewrite','music','sound effect','cut?']
+WHATS_NEW="""• Notes: a private block type that is never exported (+ Note)
+• Find and replace (Ctrl+H)
+• Outline button and a tag filter above the script list
+• Word count, scene count and reading time in the status bar
+• Scenes are numbered, and cast cards show how many lines each character has
+• Light theme (View menu)
+• Your own tag presets (Edit menu), and tags can be included in exports (Export menu)
+• More emotion presets, and the emotions you type are remembered
+"""
 FONTS_LOADED=False
 def load_fonts():
     global FONTS_LOADED
@@ -60,7 +69,7 @@ def validate(data):
             if im.isNull():raise ValueError('Damaged character image.')
     bids=set()
     for b in blocks:
-        if not isinstance(b,dict) or not isinstance(b.get('id'),str) or b['id'] in bids or b.get('type') not in ('scene','action','dialogue'):raise ValueError('Invalid script block.')
+        if not isinstance(b,dict) or not isinstance(b.get('id'),str) or b['id'] in bids or b.get('type') not in ('scene','action','dialogue','note'):raise ValueError('Invalid script block.')
         bids.add(b['id'])
         if not isinstance(b.get('text'),str) or not isinstance(b.get('delivery',''),str):raise ValueError('Invalid script text.')
         if b.get('speaker') is not None and b.get('speaker') not in ids:raise ValueError('Unknown speaker reference.')
@@ -149,6 +158,16 @@ QScrollBar::handle:vertical { background: #85405a; min-height: 24px; border-radi
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QToolTip { background: #482434; color: #fff3f7; border: 1px solid #c56184; }
 '''
+# The light theme is the dark theme with every colour swapped for a light partner.
+LIGHT_COLORS={'#190f15':'#fbf3f6','#f8eaf0':'#2b1520','#29151f':'#f1dde6','#822b49':'#e9a9bf','#764151':'#c99aab','#492132':'#f0d4de','#75404e':'#c58b9d','#71304a':'#e7b3c6','#da6c8b':'#b8466a','#992c51':'#dc8aa6','#997981':'#a98d97','#2b1921':'#f5e6ec','#442a32':'#dcc0ca','#24151c':'#ffffff','#724051':'#cfa1b2','#943756':'#f0a3bd','#fff6fa':'#2b1520','#e17b99':'#c4577a','#2d1923':'#ffffff','#21131a':'#fff9fb','#58303e':'#d7b3c1','#6b263f':'#f2b8cc','#fff3f8':'#2b1520','#d26b8a':'#c4577a','#402031':'#f6dde7','#f09bb3':'#a8325b','#c8a5b3':'#7a5666','#543040':'#dcc0ca','#bb4d72':'#c4577a','#d4b0be':'#5c3a48','#25141d':'#f1dde6','#85405a':'#c58b9d','#482434':'#ffffff','#fff3f7':'#2b1520','#c56184':'#c4577a'}
+LIGHT_STYLE=re.sub(r'#[0-9a-fA-F]{6}',lambda m:LIGHT_COLORS.get(m.group(0).lower(),m.group(0)),STYLE)
+class FindReplaceDialog(QDialog):
+    def __init__(self,parent):
+        super().__init__(parent);self.setWindowTitle('Find and replace');form=QFormLayout(self)
+        self.find=QLineEdit();self.replace=QLineEdit();self.case=QCheckBox('Match upper/lower case')
+        form.addRow('Find',self.find);form.addRow('Replace with',self.replace);form.addRow('',self.case)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Replace all');buttons.accepted.connect(self.accept);buttons.rejected.connect(self.reject);form.addRow(buttons)
 class Window(QMainWindow):
     def __init__(self,recovery_prompt=True):
         super().__init__();load_fonts();self.resize(1220,810);self.setMinimumSize(850,580);self.setAcceptDrops(True)
@@ -160,10 +179,11 @@ class Window(QMainWindow):
         self.history=QUndoStack(self);self.history.setUndoLimit(100)
         self.build_ui();self.build_menus();self.history.indexChanged.connect(self.history_state);self.history.cleanChanged.connect(self.history_state)
         for editor in (self.text,self.title_edit,self.delivery.lineEdit(),self.tag_combo.lineEdit()):editor.installEventFilter(self)
-        self.refresh();self.history.setClean();self.restore_workspace()
+        self.refresh();self.history.setClean();self.restore_workspace();self.apply_theme()
         self.timer=QTimer(self);self.timer.setInterval(30000);self.timer.timeout.connect(self.autosave);self.timer.start()
         if recovery_prompt:QTimer.singleShot(100,self.offer_recovery)
         if recovery_prompt and self.settings.value('check_updates',True,type=bool):QTimer.singleShot(1500,self.check_updates)
+        if recovery_prompt:QTimer.singleShot(900,self.maybe_whats_new)
     def button(self,text,fn,layout):
         b=QPushButton(text);b.clicked.connect(fn);layout.addWidget(b);return b
     def heading(self,text,layout):
@@ -182,12 +202,14 @@ class Window(QMainWindow):
         middle=QWidget();ml=QVBoxLayout(middle);ml.setContentsMargins(5,0,5,0);self.heading('SCRIPT',ml)
         self.title_edit=QLineEdit();self.title_edit.setPlaceholderText('Script title');self.title_edit.textChanged.connect(self.title_changed);ml.addWidget(self.title_edit)
         self.block_search=QLineEdit();self.block_search.setPlaceholderText('Find text, scenes, or a speaker…');self.block_search.textChanged.connect(self.filter_blocks);ml.addWidget(self.block_search)
+        row=QHBoxLayout();self.tag_filter=QComboBox();self.tag_filter.addItem('All tags',None);self.tag_filter.currentIndexChanged.connect(self.filter_blocks);row.addWidget(self.tag_filter,1)
+        self.outline_button=self.button('Outline',self.filter_blocks,row);self.outline_button.setCheckable(True);self.outline_button.setToolTip('Show only scene headings');ml.addLayout(row)
         self.blocks=QListWidget();self.blocks.setWordWrap(True);self.blocks.setSpacing(3);self.blocks.currentItemChanged.connect(self.block_selected);self.blocks.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove);self.blocks.setDefaultDropAction(Qt.DropAction.MoveAction);self.blocks.model().rowsMoved.connect(self.rows_moved);self.blocks.itemDoubleClicked.connect(self.rename_scene);ml.addWidget(self.blocks,1)
-        row=QHBoxLayout();self.button('+ Dialogue',lambda:self.add_block('dialogue'),row);self.button('+ Action',lambda:self.add_block('action'),row);self.button('+ Scene',lambda:self.add_block('scene'),row);ml.addLayout(row)
+        row=QHBoxLayout();self.button('+ Dialogue',lambda:self.add_block('dialogue'),row);self.button('+ Action',lambda:self.add_block('action'),row);self.button('+ Scene',lambda:self.add_block('scene'),row);self.button('+ Note',lambda:self.add_block('note'),row);ml.addLayout(row)
         row=QHBoxLayout();self.up_button=self.button('↑',lambda:self.move_block(-1),row);self.down_button=self.button('↓',lambda:self.move_block(1),row);self.duplicate_button=self.button('Duplicate',self.duplicate_block,row);self.delete_button=self.button('Delete',self.delete_block,row);ml.addLayout(row)
         self.splitter.addWidget(middle)
         editor=QWidget();el=QVBoxLayout(editor);el.setContentsMargins(7,0,0,0);self.editor_heading=self.heading('SCENE',el)
-        self.type_combo=QComboBox();self.type_combo.addItem('Scene heading','scene');self.type_combo.addItem('Action','action');self.type_combo.addItem('Dialogue','dialogue');self.type_combo.currentIndexChanged.connect(self.type_changed);el.addWidget(self.type_combo)
+        self.type_combo=QComboBox();self.type_combo.addItem('Scene heading','scene');self.type_combo.addItem('Action','action');self.type_combo.addItem('Dialogue','dialogue');self.type_combo.addItem('Note (never exported)','note');self.type_combo.currentIndexChanged.connect(self.type_changed);el.addWidget(self.type_combo)
         self.speaker_label=QLabel('Speaker');el.addWidget(self.speaker_label);self.speaker_combo=QComboBox();self.speaker_combo.setIconSize(QSize(34,34));self.speaker_combo.currentIndexChanged.connect(self.speaker_changed);el.addWidget(self.speaker_combo)
         self.delivery_label=QLabel('Delivery note (optional)');el.addWidget(self.delivery_label);self.delivery=QComboBox();self.delivery.setEditable(True);self.delivery.setInsertPolicy(QComboBox.InsertPolicy.NoInsert);self.delivery.addItems(EMOTIONS);self.delivery.setCurrentIndex(-1);self.delivery.lineEdit().setPlaceholderText('pick an emotion or type your own…');self.delivery.currentTextChanged.connect(self.delivery_changed);el.addWidget(self.delivery)
         # Tags: pick a preset or type your own. Click a tag below to remove it.
@@ -200,7 +222,7 @@ class Window(QMainWindow):
         self.text=QPlainTextEdit();self.text.setPlaceholderText('Write here…');self.text.setUndoRedoEnabled(False);self.text.setFont(QFont('DejaVu Sans',13));self.text.textChanged.connect(self.text_changed);el.addWidget(self.text,1)
         self.editor_hint=QLabel('Scene headings separate the story. Action describes what happens. Dialogue uses your cast.');self.editor_hint.setWordWrap(True);self.editor_hint.setObjectName('muted');el.addWidget(self.editor_hint)
         self.splitter.addWidget(editor);self.splitter.setSizes([235,450,450]);self.splitter.setChildrenCollapsible(False)
-        self.statusBar().showMessage('Add a character picture, then choose + Dialogue.');self.recovery_label=QLabel('Recovery every 30s');self.statusBar().addPermanentWidget(self.recovery_label)
+        self.statusBar().showMessage('Add a character picture, then choose + Dialogue.');self.count_label=QLabel('');self.statusBar().addPermanentWidget(self.count_label);self.recovery_label=QLabel('Recovery every 30s');self.statusBar().addPermanentWidget(self.recovery_label)
     def action(self,menu,label,shortcut,fn):
         a=QAction(label,self)
         if shortcut:a.setShortcut(QKeySequence(shortcut))
@@ -210,8 +232,10 @@ class Window(QMainWindow):
         e=self.menuBar().addMenu('Edit');self.undo_action=self.action(e,'Undo','Ctrl+Z',self.undo);self.redo_action=self.action(e,'Redo','Ctrl+Y',self.redo);self.redo_extra=QAction(self);self.redo_extra.setShortcut('Ctrl+Shift+Z');self.redo_extra.triggered.connect(self.redo);self.addAction(self.redo_extra)
         self.action(e,'Duplicate block','Ctrl+D',self.duplicate_block)
         self.action(e,'Rename scene…','F2',self.rename_scene)
+        self.action(e,'Find and replace…','Ctrl+H',self.find_replace);self.action(e,'Edit tag presets…',None,self.edit_tag_presets)
         export=self.menuBar().addMenu('Export');self.action(export,'Plain text (.txt)…',None,lambda:self.export_dialog('txt'));self.action(export,'Readable PDF…','Ctrl+E',lambda:self.export_dialog('pdf'));self.action(export,'StoryboardStudio project (.sboard)…',None,lambda:self.export_dialog('sboard'))
-        view=self.menuBar().addMenu('View');self.action(view,'Reset workspace',None,self.reset_workspace)
+        self.tags_export_action=self.action(export,'Include tags in exports',None,lambda on:self.settings.setValue('export_tags',on));self.tags_export_action.setCheckable(True);self.tags_export_action.setChecked(self.settings.value('export_tags',False,type=bool))
+        view=self.menuBar().addMenu('View');self.action(view,'Reset workspace',None,self.reset_workspace);self.theme_action=self.action(view,'Light theme',None,self.toggle_theme);self.theme_action.setCheckable(True);self.theme_action.setChecked(self.settings.value('light_theme',False,type=bool))
         h=self.menuBar().addMenu('Help');self.action(h,'Quick start / shortcuts','F1',self.help);self.action(h,'About',None,lambda:QMessageBox.information(self,'About ScriptStudio',f'ScriptStudio {VERSION}\nPicture-based script writing.\nDark cherry edition.\nLocal files; no account or internet required.'))
         h.addSeparator();self.action(h,'Check for updates now…',None,lambda:self.check_updates(True))
         self.update_action=self.action(h,'Check for updates when ScriptStudio starts',None,lambda on:self.settings.setValue('check_updates',on));self.update_action.setCheckable(True);self.update_action.setChecked(self.settings.value('check_updates',True,type=bool))
@@ -252,7 +276,7 @@ class Window(QMainWindow):
     def undo(self):self.history.undo()
     def redo(self):self.history.redo()
     def block_preview(self,b):
-        header={'scene':'SCENE','action':'ACTION','dialogue':self.speaker_name(b.get('speaker')).upper()}[b['type']]
+        kind=b['type'];header='NOTE' if kind=='note' else 'ACTION' if kind=='action' else self.speaker_name(b.get('speaker')).upper() if kind=='dialogue' else 'SCENE '+str(self.scene_number(b))
         if b['type']=='dialogue' and b.get('delivery'):header+='  ('+b['delivery']+')'
         if b.get('tags'):header+='   ['+', '.join(b['tags'])+']'
         text=b['text'].replace('\n',' ')
@@ -262,7 +286,7 @@ class Window(QMainWindow):
         try:
             self.title_edit.setText(self.project['title']);self.cast.clear();self.speaker_combo.clear();self.speaker_combo.addItem('Choose a character…',None)
             for c in self.project['characters']:
-                icon=QIcon(picture(c.get('image','')));item=QListWidgetItem(icon,c['name']);item.setData(Qt.ItemDataRole.UserRole,c['id']);item.setToolTip(c.get('description','') or c['name']);item.setSizeHint(QSize(170,92));self.cast.addItem(item);self.speaker_combo.addItem(icon,c['name'],c['id'])
+                icon=QIcon(picture(c.get('image','')));lines=sum(1 for x in self.project['blocks'] if x.get('speaker')==c['id']);item=QListWidgetItem(icon,c['name']+'\n'+str(lines)+(' line' if lines==1 else ' lines'));item.setData(Qt.ItemDataRole.UserRole,c['id']);item.setToolTip(c.get('description','') or c['name']);item.setSizeHint(QSize(170,92));self.cast.addItem(item);self.speaker_combo.addItem(icon,c['name'],c['id'])
                 if c['id']==self.default_speaker:self.cast.setCurrentItem(item)
             self.blocks.clear()
             for b in self.project['blocks']:
@@ -273,7 +297,7 @@ class Window(QMainWindow):
             if not self.current_block():
                 self.selected=self.project['blocks'][0]['id'] if self.project['blocks'] else None
                 if self.blocks.count():self.blocks.setCurrentRow(0)
-            self.load_editor();self.filter_cast();self.filter_blocks();self.character_state()
+            self.fill_tag_filter();self.load_editor();self.filter_cast();self.filter_blocks();self.character_state();self.update_counts()
         finally:self.restoring=False
         self.update_title()
     def load_editor(self):
@@ -285,11 +309,11 @@ class Window(QMainWindow):
             kind=b['type'] if b else 'scene';dialogue=kind=='dialogue' and enabled
             self.type_combo.setCurrentIndex(self.type_combo.findData(kind));self.editor_heading.setText(kind.upper() if enabled else 'ADD A BLOCK');self.text.setPlainText(b['text'] if b else '')
             for widget in (self.speaker_label,self.speaker_combo,self.delivery_label,self.delivery):widget.setVisible(dialogue)
-            self.speaker_combo.setCurrentIndex(max(0,self.speaker_combo.findData(b.get('speaker') if b else None)));self.delivery.setCurrentText(b.get('delivery','') if b else '');self.load_tags(b)
-            self.text.setPlaceholderText({'scene':'Scene 1 — Bedroom, night','action':'Describe what happens…','dialogue':'What do they say?'}[kind])
+            self.speaker_combo.setCurrentIndex(max(0,self.speaker_combo.findData(b.get('speaker') if b else None)));self.fill_emotions();self.delivery.setCurrentText(b.get('delivery','') if b else '');self.load_tags(b)
+            self.text.setPlaceholderText({'scene':'Scene 1 — Bedroom, night','action':'Describe what happens…','dialogue':'What do they say?','note':'A private note to yourself. It is never exported…'}[kind])
         finally:self.restoring=old
     def update_block_preview(self):
-        b=self.current_block()
+        self.update_counts();b=self.current_block()
         if not b:return
         for i in range(self.blocks.count()):
             item=self.blocks.item(i)
@@ -324,10 +348,63 @@ class Window(QMainWindow):
         if self.restoring:return
         ids=[self.blocks.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.blocks.count())];mapping={b['id']:b for b in self.project['blocks']}
         if set(ids)==set(mapping):self.mutate('Reorder blocks',lambda:self.project.update(blocks=[mapping[i] for i in ids]))
+    def tag_presets(self):
+        saved=self.settings.value('tag_presets',[],type=list)
+        if isinstance(saved,str):saved=[saved]
+        return [str(t) for t in saved if str(t).strip()] or list(TAG_PRESETS)
+    def edit_tag_presets(self):
+        text,ok=QInputDialog.getMultiLineText(self,'Tag presets','One tag per line. Leave it empty to restore the standard list.','\n'.join(self.tag_presets()))
+        if not ok:return
+        tags=[];seen=set()
+        for line in text.splitlines():
+            tag=' '.join(line.split())[:40]
+            if tag and tag.casefold() not in seen:seen.add(tag.casefold());tags.append(tag)
+        if tags:self.settings.setValue('tag_presets',tags)
+        else:self.settings.remove('tag_presets')
+        self.load_tags(self.current_block())
+    def fill_emotions(self):
+        # The emotion dropdown offers the presets plus every emotion you have typed before.
+        used=sorted({x.get('delivery','') for x in self.project['blocks'] if x.get('delivery')}-set(EMOTIONS),key=str.casefold)
+        self.delivery.blockSignals(True);self.delivery.clear();self.delivery.addItems(EMOTIONS+used);self.delivery.blockSignals(False)
+    def fill_tag_filter(self):
+        current=self.tag_filter.currentData();used=sorted({t for x in self.project['blocks'] for t in x.get('tags',[])},key=str.casefold)
+        self.tag_filter.blockSignals(True);self.tag_filter.clear();self.tag_filter.addItem('All tags',None)
+        for t in used:self.tag_filter.addItem(t,t)
+        self.tag_filter.setCurrentIndex(max(0,self.tag_filter.findData(current)));self.tag_filter.blockSignals(False)
+    def scene_number(self,block):
+        number=0
+        for x in self.project['blocks']:
+            if x['type']=='scene':number+=1
+            if x['id']==block['id']:break
+        return number
+    def update_counts(self):
+        blocks=self.project['blocks'];words=sum(len(b['text'].split()) for b in blocks if b['type']!='note');scenes=sum(1 for b in blocks if b['type']=='scene')
+        minutes=max(1,round(words/200)) if words else 0
+        self.count_label.setText(f'{words:,} words · {scenes} scene{"" if scenes==1 else "s"} · ~{minutes} min read   ')
+    def replace_all(self,find,replace,match_case=False):
+        pattern=re.compile(re.escape(find),0 if match_case else re.IGNORECASE)
+        count=sum(len(pattern.findall(b['text'])) for b in self.project['blocks'])
+        if count:
+            def change():
+                for b in self.project['blocks']:b['text']=pattern.sub(lambda m:replace,b['text'])
+            self.mutate('Replace all',change)
+        return count
+    def find_replace(self):
+        dialog=FindReplaceDialog(self)
+        if dialog.exec()!=QDialog.DialogCode.Accepted or not dialog.find.text():return
+        count=self.replace_all(dialog.find.text(),dialog.replace.text(),dialog.case.isChecked())
+        QMessageBox.information(self,'Find and replace',f'Replaced {count} place(s).' if count else 'Nothing found.')
+    def apply_theme(self):
+        QApplication.instance().setStyleSheet(LIGHT_STYLE if self.settings.value('light_theme',False,type=bool) else STYLE)
+    def toggle_theme(self,on):
+        self.settings.setValue('light_theme',on);self.apply_theme()
+    def maybe_whats_new(self):
+        seen=self.settings.value('seen_version','');self.settings.setValue('seen_version',VERSION)
+        if seen!=VERSION:QMessageBox.information(self,"What's new in "+VERSION,WHATS_NEW)
     def load_tags(self,b):
         # The dropdown offers the presets plus every custom tag already used in this script.
         used=sorted({t for x in self.project['blocks'] for t in x.get('tags',[])},key=str.casefold)
-        self.tag_combo.clear();self.tag_combo.addItems(TAG_PRESETS+[t for t in used if t not in TAG_PRESETS]);self.tag_combo.setCurrentIndex(-1)
+        self.tag_combo.clear();presets=self.tag_presets();self.tag_combo.addItems(presets+[t for t in used if t not in presets]);self.tag_combo.setCurrentIndex(-1)
         self.tag_list.clear()
         for tag in (b.get('tags',[]) if b else []):
             item=QListWidgetItem(tag+'  ✕');item.setData(Qt.ItemDataRole.UserRole,tag);self.tag_list.addItem(item)
@@ -417,11 +494,14 @@ class Window(QMainWindow):
         for i in range(self.cast.count()):
             item=self.cast.item(i);c=self.character(item.data(Qt.ItemDataRole.UserRole));item.setHidden(search not in (c['name']+' '+c.get('description','')).casefold())
     def filter_blocks(self,*_):
-        search=self.block_search.text().casefold()
+        # A block is hidden if it fails the search, the tag filter or the outline switch.
+        search=self.block_search.text().casefold();tag=self.tag_filter.currentData();outline=self.outline_button.isChecked()
         for i in range(self.blocks.count()):
             item=self.blocks.item(i);b=next((b for b in self.project['blocks'] if b['id']==item.data(Qt.ItemDataRole.UserRole)),None)
-            if b:item.setHidden(search not in (self.speaker_name(b.get('speaker'))+' '+b['text']+' '+b.get('delivery','')+' '+' '.join(b.get('tags',[]))+' '+b['type']).casefold())
-        self.blocks.setDragEnabled(not search);self.blocks.setAcceptDrops(not search)
+            if b:
+                words=(self.speaker_name(b.get('speaker'))+' '+b['text']+' '+b.get('delivery','')+' '+' '.join(b.get('tags',[]))+' '+b['type']).casefold()
+                item.setHidden(search not in words or bool(tag and tag not in b.get('tags',[])) or (outline and b['type']!='scene'))
+        filtering=bool(search or tag or outline);self.blocks.setDragEnabled(not filtering);self.blocks.setAcceptDrops(not filtering)
     def ask_save(self):
         self.wait_jobs()
         if not self.dirty():return True
@@ -518,26 +598,36 @@ class Window(QMainWindow):
         for p in paths:
             a=self.recent.addAction(os.path.basename(p));a.setToolTip(p);a.triggered.connect(lambda checked=False,path=p:self.open_path(path))
         self.recent.addSeparator();a=self.recent.addAction('Clear recent list');a.triggered.connect(lambda:(self.settings.setValue('recent',[]),self.update_recent()))
+    def tag_line(self,b):
+        # Tags only reach exports when "Include tags in exports" is ticked.
+        return '[tags: '+', '.join(b['tags'])+']' if b.get('tags') and self.settings.value('export_tags',False,type=bool) else ''
     def plain_text(self):
         lines=[self.project['title'].strip() or 'Untitled','='*40,'']
         for b in self.project['blocks']:
-            if b['type']=='scene':lines.extend([b['text'].upper(),''])
-            elif b['type']=='action':lines.extend([b['text'],''])
+            if b['type']=='note':continue
+            if b['type']=='scene':lines.append(b['text'].upper())
+            elif b['type']=='action':lines.append(b['text'])
             else:
                 lines.append(self.speaker_name(b.get('speaker')).upper())
                 if b.get('delivery'):lines.append('('+b['delivery']+')')
-                lines.extend([b['text'],''])
+                lines.append(b['text'])
+            tags=self.tag_line(b)
+            if tags:lines.append(tags)
+            lines.append('')
         return '\n'.join(lines)
     def export_pdf(self,path):
         esc=lambda text:html.escape(text).replace('\n','<br>')
         paragraphs=['<h1>'+esc(self.project['title'].strip() or 'Untitled')+'</h1>']
         for b in self.project['blocks']:
+            if b['type']=='note':continue
             if b['type']=='scene':paragraphs.append('<h2>'+esc(b['text'].upper())+'</h2>')
             elif b['type']=='action':paragraphs.append('<p>'+esc(b['text'])+'</p>')
             else:
                 heading=esc(self.speaker_name(b.get('speaker')).upper())
                 if b.get('delivery'):heading+='<br><i>('+esc(b['delivery'])+')</i>'
                 paragraphs.append('<p style="margin-left:65px; margin-right:65px;"><b>'+heading+'</b><br>'+esc(b['text'])+'</p>')
+            tags=self.tag_line(b)
+            if tags:paragraphs.append('<p><i>'+esc(tags)+'</i></p>')
         doc=QTextDocument();doc.setDefaultFont(QFont('DejaVu Sans Mono',11));doc.setHtml('<html><body style="color:#111;background:white;">'+''.join(paragraphs)+'</body></html>')
         printer=QPrinter(QPrinter.PrinterMode.HighResolution);printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat);printer.setOutputFileName(path);printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4));doc.print_(printer)
         if not os.path.isfile(path) or os.path.getsize(path)<200:raise OSError('PDF could not be created.')
@@ -546,13 +636,14 @@ class Window(QMainWindow):
         # subsequent panels; this is an editable handoff, not live syncing.
         groups=[];scene='Scene 1';notes=[]
         for b in self.project['blocks']:
+            if b['type']=='note':continue
             if b['type']=='scene':
                 if notes:groups.append((scene,'\n\n'.join(notes)));notes=[]
                 scene=b['text'] or 'Untitled scene'
             else:
                 text=b['text']
                 if b['type']=='dialogue':text=self.speaker_name(b.get('speaker')).upper()+((' ('+b['delivery']+')') if b.get('delivery') else '')+'\n'+text
-                groups.append((scene,text))
+                groups.append((scene,text+(('\n'+self.tag_line(b)) if self.tag_line(b) else '')))
         if not groups:groups=[(scene,'')]
         image=QImage(1920,1080,QImage.Format.Format_ARGB32);image.fill(Qt.GlobalColor.white);buf=QBuffer();buf.open(QIODevice.OpenModeFlag.WriteOnly);image.save(buf,'PNG');encoded=base64.b64encode(bytes(buf.data())).decode('ascii')
         panels=[{'image':encoded,'notes':note,'duration':2.0,'scene':scene,'shot_label':str(i+1),'background':'white','source_path':'','underlay':''} for i,(scene,note) in enumerate(groups)]
@@ -574,7 +665,7 @@ class Window(QMainWindow):
         if geometry:self.restoreGeometry(geometry)
         if splitter:self.splitter.restoreState(splitter)
     def reset_workspace(self):self.resize(1220,810);self.splitter.setSizes([235,450,450])
-    def help(self):QMessageBox.information(self,'ScriptStudio — quick start','1. Add a character: picture, name, optional description.\n2. Add a scene, action or dialogue block.\n3. Click a cast picture to choose who is talking.\n4. Write in the right-hand editor. Reorder blocks with arrows or drag.\n\nCtrl+S: Save | Ctrl+Shift+S: Save As\nCtrl+O: Open | Ctrl+N: New\nCtrl+Z: Undo | Ctrl+Y / Ctrl+Shift+Z: Redo\nCtrl+D: Duplicate block | F2: Rename scene | Ctrl+E: PDF export\n\nTags: pick a preset or type your own, then click a tag to remove it.\n\nCharacters are linked by ID; renaming updates their dialogue. Pictures are embedded in .scriptstudio projects. Recovery runs every 30 seconds.\n\nExport > StoryboardStudio creates blank panels with script text as notes. This is a one-way export, not live syncing.')
+    def help(self):QMessageBox.information(self,'ScriptStudio — quick start','1. Add a character: picture, name, optional description.\n2. Add a scene, action or dialogue block.\n3. Click a cast picture to choose who is talking.\n4. Write in the right-hand editor. Reorder blocks with arrows or drag.\n\nCtrl+S: Save | Ctrl+Shift+S: Save As\nCtrl+O: Open | Ctrl+N: New\nCtrl+Z: Undo | Ctrl+Y / Ctrl+Shift+Z: Redo\nCtrl+D: Duplicate block | F2: Rename scene | Ctrl+H: Find and replace | Ctrl+E: PDF export\n\nTags: pick a preset or type your own, then click a tag to remove it.\n\nCharacters are linked by ID; renaming updates their dialogue. Pictures are embedded in .scriptstudio projects. Recovery runs every 30 seconds.\n\nExport > StoryboardStudio creates blank panels with script text as notes. This is a one-way export, not live syncing.')
     def dragEnterEvent(self,event):
         if event.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith('.scriptstudio') for u in event.mimeData().urls()):event.acceptProposedAction()
     def dropEvent(self,event):
