@@ -8,7 +8,7 @@ from PySide6.QtPrintSupport import QPrinter
 VERSION='1.2.0'
 FILTER='ScriptStudio projects (*.scriptstudio)'
 # Put your own GitHub name and repository name here to turn on update checking.
-UPDATE_API='https://api.github.com/repos/YOUR-NAME/YOUR-REPO/releases/latest'
+UPDATE_API= "https://github.com/Cherrydrem/ScriptStudio'
 EMOTIONS=['whispering','shouting','excited','angry','sad','nervous','laughing','crying','sarcastic','calm','off-screen','happy','scared','confused','tired','cheerful','serious','pleading','annoyed','surprised','dreamy','mumbling','singing','under breath','deadpan']
 TAG_PRESETS=EMOTIONS[:11]+['flashback','important','needs rewrite','music','sound effect','cut?']
 WHATS_NEW="""• Notes: a private block type that is never exported (+ Note)
