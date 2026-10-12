@@ -1,6 +1,6 @@
-# ScriptStudio 
+# ScriptStudio — Dark Cherry Edition
 
-**Version 1.0.0 · Windows 10/11, 64-bit**
+**Version 1.2.0 · Windows 10/11, 64-bit**
 
 ## Features
 
@@ -14,6 +14,11 @@
 - Background manual saving and recovery snapshots every 30 seconds while work is unsaved.
 - Recent projects and remembered window position, size, and pane widths.
 - Plain-text, readable PDF, and StoryboardStudio project exports.
+- Tags on any block, with preset and custom tags, a tag filter, and your own editable tag presets.
+- Emotion dropdown for delivery notes, with presets and your own entries remembered.
+- Private notes blocks that are never exported, numbered scenes, and scene renaming (F2).
+- Find and replace, an outline view, and word, scene and reading-time counts.
+- Light theme (View menu), and an optional update check (Help menu).
 
 ## Download and install
 
@@ -90,6 +95,8 @@ Storyboard export creates one blank panel for each action or dialogue block, wit
 | Ctrl+Z | Undo |
 | Ctrl+Y or Ctrl+Shift+Z | Redo |
 | Ctrl+D | Duplicate selected block |
+| F2 | Rename selected scene |
+| Ctrl+H | Find and replace |
 | Ctrl+E | Export PDF |
 | F1 | Quick start and shortcuts |
 
@@ -114,7 +121,7 @@ If a problem persists, keep the exact error text and a screenshot. Never delete 
 
 ## Privacy, source, and license
 
-ScriptStudio works with local files. It has no cloud upload, tracking, AI writing, or account system. Your `.scriptstudio` project contains the character names, pictures, and script, so share it only with people you intend to receive that content.
+ScriptStudio works with local files. It has no cloud upload, tracking, AI writing, or account system. The only internet use is an optional update check: at startup the app asks GitHub whether a newer release exists and lets you choose whether to open the download page. It sends none of your writing, and you can turn it off in **Help → Check for updates when ScriptStudio starts**. Your `.scriptstudio` project contains the character names, pictures, and script, so share it only with people you intend to receive that content.
 
 The application source is licensed under the **MIT License**; see `LICENSE.txt`. Bundled Python, Qt/PySide6, fonts, and the packaging bootloader have their own licenses. See `THIRD-PARTY-NOTICES.txt` and the `licenses` folder. Use character images you have permission to share.
 
